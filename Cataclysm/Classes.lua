@@ -5,7 +5,7 @@ if not Hekili.IsCataclysm() then return end
 
 local class, state = Hekili.Class, Hekili.State
 
-local RegisterEvent = ns.RegisterEvent
+local getSpecializationKey, RegisterEvent = ns.getSpecializationKey, ns.RegisterEvent
 
 function ns.updateTalents()
     for _, tal in pairs( state.talent ) do
@@ -43,12 +43,22 @@ function ns.updateTalents()
     end
 
     local spec = state.spec.id or select( 3, UnitClass( "player" ) )
-    if not Hekili.DB.profile.specs[ spec ].usePackSelector then return end
-
     -- Swap priorities if needed.
-    local tab1 = select( 5, GetTalentTabInfo(1) )
-    local tab2 = select( 5, GetTalentTabInfo(2) )
-    local tab3 = select( 5, GetTalentTabInfo(3) )
+    local main, tabs = GetPrimaryTalentTree(), {}
+
+    for i = 1, 3 do
+        local id, _, _, _, tab = GetTalentTabInfo( i )
+
+        tabs[ i ] = tab
+
+        if i == main then
+            state.spec[ getSpecializationKey( id ) ] = true
+        else
+            state.spec[ getSpecializationKey( id ) ] = nil
+        end
+    end
+
+    if not Hekili.DB.profile.specs[ spec ].usePackSelector then return end
 
     local fromPackage = Hekili.DB.profile.specs[ spec ].package
 
@@ -57,11 +67,11 @@ function ns.updateTalents()
 
         if not rawget( Hekili.DB.profile.packs, toPackage ) then toPackage = "none" end
 
-        if type( selector.condition ) == "function" and selector.condition( tab1, tab2, tab3 ) or
+        if type( selector.condition ) == "function" and selector.condition( tabs[1], tabs[2], tabs[3], main ) or
             type( selector.condition ) == "number" and
-                ( selector.condition == 1 and tab1 > max( tab2, tab3 ) or
-                  selector.condition == 2 and tab2 > max( tab1, tab3 ) or
-                  selector.condition == 3 and tab3 > max( tab1, tab2 ) ) then
+                ( selector.condition == 1 and tabs[1] > max( tabs[2], tabs[3] ) or
+                  selector.condition == 2 and tabs[2] > max( tabs[1], tabs[3] ) or
+                  selector.condition == 3 and tabs[3] > max( tabs[1], tabs[2] ) ) then
 
             if toPackage ~= "none" and fromPackage ~= toPackage then
                 Hekili.DB.profile.specs[ spec ].package = toPackage

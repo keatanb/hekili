@@ -6,6 +6,7 @@ local class, state = Hekili.Class, Hekili.State
 local currentBuild = select( 4, GetBuildInfo() )
 
 local FindUnitDebuffByID = ns.FindUnitDebuffByID
+local FindUnitBuffByID = ns.FindUnitBuffByID
 local round = ns.round
 
 local strformat = string.format
@@ -71,22 +72,37 @@ end )
 
 -- Glyph of Shred helper
 local tracked_rips = {}
+local rip_extension = 6
 Hekili.TR = tracked_rips;
 
-local function NewRip( target )
+local function NewRip( target, tfactive )
     tracked_rips[ target ] = {
-        extension = 0,
-        applications = 0
+        --extension = 0,
+        --applications = 0,
+        tf_snapshot = tfactive
     }
+    rip_extension = 0
+end
+local function DummyRip( target )
+    if not tracked_rips[ target ] then
+        tracked_rips[ target ] = {
+            --extension = 0,
+            --applications = 0,
+            tf_snapshot = false
+        }
+    end
 end
 
-local function RipShred( target )
+local function RipShred( target ) -- called on shreded targets having rip
     if not tracked_rips[ target ] then
-        NewRip( target )
+        DummyRip( target )
     end
-    if tracked_rips[ target ].applications < 3 then
-        tracked_rips[ target ].extension = tracked_rips[ target ].extension + 2
-        tracked_rips[ target ].applications = tracked_rips[ target ].applications + 1
+    --if tracked_rips[ target ].applications < 3 then
+    --    tracked_rips[ target ].extension = tracked_rips[ target ].extension + 2
+    --    tracked_rips[ target ].applications = tracked_rips[ target ].applications + 1
+    --end
+    if rip_extension < 6 then
+        rip_extension = rip_extension + 2
     end
 end
 
@@ -94,11 +110,14 @@ local function RemoveRip( target )
     tracked_rips[ target ] = nil
 end
 
-local function GetTrackedRip( target )
+local function GetTrackedRip( target ) 
     if not tracked_rips[ target ] then
-        NewRip( target )
+        DummyRip( target ) -- I think this is just to avoid "nullpointer" - dont want to reset extension, so will add dummy
     end
-    return tracked_rips[ target ]
+    -- Rip-Extends are shared across all targets, so we override here
+    local tr = tracked_rips[ target ]
+    tr.extension = rip_extension
+    return tr
 end
 
 
@@ -141,33 +160,40 @@ spec:RegisterCombatLogEvent( function( _, subtype, _, sourceGUID, sourceName, _,
             eclipse_solar_last_applied = GetTime()
         end
     end
+    
+    -- track buffed rips using rip_tracker as well
+    if attack_events[subtype] then
+        if spellID == 1079 then -- Spell is rip
+            local tf_up = not( FindUnitBuffByID( "player", 5217 ) == nil) -- if buff is not active, will eval to nil
+            NewRip( destGUID, tf_up)
+        end
+    end
 
     if state.glyph.bloodletting.enabled then
         if attack_events[subtype] then
             -- Track rip time extension from Glyph of Rip
-            local rip = FindUnitDebuffByID( "target", 49800 )
-            if rip and spellID == 48572 then
+            if spellID == 5221 and not( FindUnitDebuffByID( "target", 1079 ) == nil) then -- Spell is Shred and rip is active on target
                 RipShred( destGUID )
             end
         end
 
-        if application_events[subtype] then
-            -- Remove previously tracked rip
-            if spellID == 49800 then
-                RemoveRip( destGUID )
-            end
-        end
+        --if application_events[subtype] then
+        --    -- Remove previously tracked rip
+        --    if spellID == 1079 then
+        --        RemoveRip( destGUID )
+        --    end
+        --end
 
         if removal_events[subtype] then
             -- Remove previously tracked rip
-            if spellID == 49800 then
+            if spellID == 1079 then
                 RemoveRip( destGUID )
             end
         end
 
         if death_events[subtype] then
             -- Remove previously tracked rip
-            if spellID == 49800 then
+            if spellID == 1079 then
                 RemoveRip( destGUID )
             end
         end
@@ -183,9 +209,9 @@ local LastSeenCp = 0
 local CurrentCp = 0
 local DruidFinishers = {
     [52610] = true,
-    [48577] = true,
-    [49800] = true,
-    [49802] = true
+    [22568] = true,
+    [1079] = true,
+    [22570] = true
 }
 
 spec:RegisterUnitEvent( "UNIT_SPELLCAST_SUCCEEDED", "player", "target", function(event, unit, _, spellID )
@@ -211,7 +237,7 @@ spec:RegisterStateTable( "rip_tracker", setmetatable( {
         if not t.cache[k] then
             local tr = GetTrackedRip( k )
             if tr then
-                t.cache[k] = { extension = tr.extension }
+                t.cache[k] = { extension = tr.extension, tf_snapshot = tr.tf_snapshot}
             end
         end
         return t.cache[k]
@@ -236,23 +262,24 @@ spec:RegisterStateFunction("set_last_finisher_cp", function(val)
     lastfinishercp = val
 end)
 
-local riptfsnapshot = nil
+spec:RegisterStateExpr("pseudo_rip_tf_snapshot", function()
+    if tracked_rips[ target.unit ] then
+       return tracked_rips[ target.unit ].tf_snapshot 
+    end
+    return "leer"
+end)
+
 spec:RegisterStateExpr("rip_tf_snapshot", function()
-    return riptfsnapshot
+    return rip_tracker[target.unit].tf_snapshot
 end)
 
-spec:RegisterStateFunction("set_rip_tf_snapshot", function(val)
-    riptfsnapshot = val
-end)
+local ExpirePrimalMadness = setfenv( function ()
 
-local rip_extend_counter = 0
-spec:RegisterStateExpr("rip_extend_count", function()
-    return rip_extend_counter
-end)
-
-spec:RegisterStateFunction("set_rip_extend_count", function(val)
-    rip_extend_counter = val
-end)
+    if buff.primal_madness.up then
+        gain(-10 * talent.primal_madness.rank, "energy")
+        energy.max = energy.max - 10 * talent.primal_madness.rank
+    end
+end, state )
 
 local training_dummy_cache = {}
 local avg_rage_amount = rage_amount()
@@ -260,13 +287,17 @@ spec:RegisterHook( "reset_precast", function()
     stat.spell_haste = stat.spell_haste * ( 1 + ( 0.01 * talent.celestial_focus.rank ) + ( buff.natures_grace.up and 0.2 or 0 ) + ( buff.moonkin_form.up and ( talent.improved_moonkin_form.rank * 0.01 ) or 0 ) )
 
     rip_tracker:reset()
-    set_rip_extend_count(0) 
     set_last_finisher_cp(LastFinisherCp)
 
-    if IsCurrentSpell( class.abilities.maul.id ) then
-        start_maul()
-        Hekili:Debug( "Starting Maul, next swing in %.2f...", buff.maul.remains)
+    if buff.primal_madness.up then
+        buff.primal_madness.expires = max(buff.tigers_fury.expires, buff.berserk.expires)
+        state:QueueAuraExpiration( "primal_madness", ExpirePrimalMadness, buff.primal_madness.expires)
     end
+    
+    --if IsCurrentSpell( class.abilities.maul.id ) then
+    --    start_maul()
+    --    Hekili:Debug( "Starting Maul, next swing in %.2f...", buff.maul.remains)
+    --end
 
     avg_rage_amount = rage_amount()
 
@@ -283,14 +314,14 @@ spec:RegisterStateExpr("rage_gain", function()
 end)
 
 spec:RegisterStateExpr("rip_canextend", function()
-    return debuff.rip.up and glyph.bloodletting.enabled and rip_extend_count > 0
+    return debuff.rip.up and glyph.bloodletting.enabled and rip_tracker[target.unit].extension < 6
 end)
 
 spec:RegisterStateExpr("rip_maxremains", function()
     if debuff.rip.remains == 0 then
         return 0
     else
-        return debuff.rip.remains + ((debuff.rip.up and glyph.bloodletting.enabled and (rip_extend_count)) or 0)
+        return debuff.rip.remains + ((debuff.rip.up and glyph.bloodletting.enabled and (6 - rip_tracker[target.unit].extension)) or 0)
     end
 end)
 
@@ -560,7 +591,7 @@ spec:RegisterStateExpr("calc_rip_refresh_time", function()
     end
 
     -- If we're not gaining a new Tiger's Fury snapshot, then use the standard 1 tick refresh window
-    local standard_refresh_time = debuff.rip.expires - debuff.rip.tick_time
+    local standard_refresh_time = debuff.rip.expires -- - debuff.rip.tick_time -- TODO: reimplement 1 tick refresh window when we find out how to calc overridablility
 
     if not buff.tigers_fury.up or is_execute_phase or (combo_points.current < 5) then
         return standard_refresh_time
@@ -1049,8 +1080,8 @@ end)
 -- Calculate if we should Leaveweave/Meleeweave (run out and feral_charge_cat in for stampede)
 spec:RegisterStateExpr("should_leaveweave", function()
     -- Estimate time to run out and charge back in
-    local run_out_time = (action.feral_charge_cat.minRange + 1 - target.distance) / movement_speed + latency
-    local charge_in_time = (action.feral_charge_cat.minRange + 1) / 80 + latency
+    local run_out_time = (action.feral_charge_cat.real_minRange + 1 - target.distance) / movement_speed + latency
+    local charge_in_time = (action.feral_charge_cat.real_minRange + 1) / 80 + latency
     local weave_duration = run_out_time + charge_in_time
     local weave_energy = energy.max - (weave_duration * energy.regen)
 
@@ -1069,7 +1100,7 @@ spec:RegisterStateExpr("should_leaveweave", function()
     -- Also add an end-of-fight condition to make sure we can spend down our Energy post-weave before the encounter ends.
     local energy_to_dump = energy.current + weave_duration * energy.regen
     local time_to_dump = floor(energy_to_dump / action.shred.cost)
-    return weave_end + time_to_dump < ttd
+    return weave_duration + time_to_dump < ttd
 end)
 
 spec:RegisterStateExpr("bear_mode_tank_enabled", function()
@@ -1121,7 +1152,7 @@ spec:RegisterResource( Enum.PowerType.Rage, {
 } )
 spec:RegisterResource( Enum.PowerType.Mana )
 spec:RegisterResource( Enum.PowerType.ComboPoints )
-spec:RegisterResource( Enum.PowerType.Energy )
+spec:RegisterResource( Enum.PowerType.Energy)
 
 
 -- Talents
@@ -1598,6 +1629,12 @@ spec:RegisterAuras( {
         duration = 8,
         max_stack = 1,
     },
+    -- Total Energy increased by 20.
+    primal_madness = {
+        id = 80886,
+        duration = 20,
+        max_stack = 1,
+    },
     -- Stealthed.  Movement speed slowed by $s2%.
     prowl = {
         id = 5215,
@@ -1637,7 +1674,7 @@ spec:RegisterAuras( {
     },
     -- Bleed damage every $t1 seconds.
     rip = {
-        id = 49800,
+        id = 1079,
         duration = function() return 12 + ((glyph.rip.enabled and 4) or 0) + ((set_bonus.tier7feral_2pc == 1 and 4) or 0) end,
         tick_time = 2,
         max_stack = 1,
@@ -1972,6 +2009,15 @@ spec:RegisterAbilities( {
         toggle = "cooldowns",
         handler = function()
             applyBuff( "berserk" )
+            if talent.primal_madness.enabled then
+                if not buff.primal_madness.up then
+                    energy.max = energy.max + 10 * talent.primal_madness.rank
+                    gain(10 * talent.primal_madness.rank, "energy")
+                end
+                applyBuff("primal_madness", buff.berserk.duration)
+                buff.primal_madness.expires = buff.berserk.expires
+                state:QueueAuraExpiration( "primal_madness", ExpirePrimalMadness, buff.primal_madness.expires)                
+            end
         end,
     },
     --When you Ferocious Bite a target at or below 25% health, you have a chance to instantly refresh the duration of your Rip on the target. Requires Druid.
@@ -2317,7 +2363,8 @@ spec:RegisterAbilities( {
         spend = 10, 
         spendType = "energy",
 
-        minRange = 8,
+        minRange = function() return leaveweaving_enabled and 0 or 8 end, -- we need to set this to 0 to indicate leaveweaving
+        real_minRange = 8, -- we still need the real value for leaveweave calculations
         maxRange = 25,
 
         startsCombat = true,
@@ -3208,14 +3255,14 @@ spec:RegisterAbilities( {
         texture = 132152,
 
         usable = function() return combo_points.current > 0, "requires combo_points" end,
-        readyTime = function() return debuff.rip.remains - debuff.rip.tick_time end, -- Clipping rip is a DPS loss and an unpredictable recommendation. AP snapshot on previous rip will prevent overriding
+        readyTime = function() return debuff.rip.remains end, -- ((not rip_tf_snapshot or buff.tigers_fury.up ) and debuff.rip.tick_time or 0) end, -- Disable last tick refresh for now until we know if new rip is stronger
         handler = function ()
             applyDebuff( "target", "rip" )
             removeBuff( "clearcasting" )
             set_last_finisher_cp(combo_points.current)
-            set_rip_tf_snapshot(buff.tigers_fury.up) -- FIXME: is there no better way to bind the information on each active rip? This will be a bottleneck on multi-rips
             spend( combo_points.current, "combo_points" )
-            set_rip_extend_count(6)
+            rip_tracker[target.unit].extension = 0
+            rip_tracker[target.unit].tf_snapshot = buff.tigers_fury.up 
         end,
 
     },
@@ -3301,8 +3348,8 @@ spec:RegisterAbilities( {
         cost = function () return max( 40, class.abilities.shred.spend ) end,
 
         handler = function ()
-            if glyph.bloodletting.enabled and debuff.rip.up and rip_extend_count > 0 then
-                set_rip_extend_count(rip_extend_count - 2)
+            if rip_canextend then
+                rip_tracker[target.unit].extension = rip_tracker[target.unit].extension + 2
                 applyDebuff( "target", "rip", debuff.rip.remains + 2)
             end
             gain( 1, "combo_points" )
@@ -3668,6 +3715,14 @@ spec:RegisterAbilities( {
 
         form = "cat_form",
         handler = function()
+            applyBuff("tigers_fury")
+            if talent.primal_madness.enabled then -- we dont need to check on primal_madness.up since TF cant be casted during active berserk
+                applyBuff("primal_madness", aura.tigers_fury.duration)
+                energy.max = energy.max + 10 * talent.primal_madness.rank
+                gain(10 * talent.primal_madness.rank, "energy")
+                buff.primal_madness.expires = buff.tigers_fury.expires
+                state:QueueAuraExpiration( "primal_madness", ExpirePrimalMadness, buff.primal_madness.expires) 
+            end
             gain( 20 * talent.king_of_the_jungle.rank, "energy" )
         end,
 
@@ -3894,6 +3949,14 @@ spec:RegisterSetting( "maintain_ff", true, {
     type = "toggle",
     name = "Maintain Faerie Fire",
     desc = "If checked, Keep up Sunder debuff if not provided externally.\n\n"..
+        "Default: Checked",
+    width = "full",
+} )
+
+spec:RegisterSetting( "maintain_roar", true, {
+    type = "toggle",
+    name = "Maintain Demoralizing Roar",
+    desc = "If checked, Keep up AP debuff if not provided externally.\n\n"..
         "Default: Checked",
     width = "full",
 } )
@@ -4162,8 +4225,8 @@ spec:RegisterOptions( {
 
 -- Default Packs
 spec:RegisterPack( "Balance (IV)", 20230228, [[Hekili:9IvZUTnoq4NfFXigBQw74MMgG6COOh20d9IxShLeTmvmr0FlfLnYcb9SVdffTO4pskfO9sRd5mFZhNz4mdL)g))2F)red7)J7wF3213D3N92S5(h)4g)9S3kW(7lqrVIEb(rgkf(3VIsqzr4MWBE(FwX39TKC0rokL5v0iqc)9hQijSNZ8pyf6TpcYwGJ8)XgWiNihpIfIIlJuW)B0kYXMWckjNsyV1egNtBc)l8RKecyxAEmjbSgkIrYZk9kO4O80di2FS7ptr0xdYJdyNWbxijhVLeVBrvXYfhQIJ9EHeZu31RQO572GHDkNMv2PSDrsZZZELKfaClDublY5R189R7cRfHssce)zqcPKDl3dVJKryQsrRYmfcLJ5MJV(zCaodNsWLpTDs9klqT88mIsqhsWE8fcYYVmPMXKYtk03JttqwjqcHsQYq0ajM3EgLuH3160XrjKIsCqRed84wbQmpzcGALyganeIRN7HmTUU3HmWYtGo3POG(chWVCXph8cuIqzbq6EKB3zcQKfGkksi4J7wxx)Vvy6Bbmsk(dti9t72UEkpylJhJeIqXCjHP0ZGecpHM7(QtvU(sn)VK0Z6eoj43OfeLOxxRh3L7Ss9cdhhW0LmenMqBV(k8lGo4YGlue7eKpV8gD0KeOU2uEkofrYk)IWiEsW9Ej6yDDA(zs2lRmOaVOLKcloIBrvUgNbc9mudQXfH5foZqSkk2(jdkPzQictj4GRMKFizOeCgZJKc(PZ4JbkY4HZ4NE4a8cnVQiifNEatlFA39UpsGpahXckVG6Qd3DSuxFqXIo9GwCNGtoxfb0lFjbwYRBDjvE3UqhHWL6IkJFBnSqB8DqP6HqnAILwMAVo9AXlbbADc6XtHUXqiaffHtWGzH9VTQKhQJdGePDB6Zv1QIV0YQDhPNkXmg4qlL3jYZtoMFbAPGXxqVzqerdYF)2LBqcdNw(730tvkWqHzMLdLqSsDzbeRC)HvgMZmf0v3llhihTcvtbHHygEfCI7Ec5nlZiw)ufLsGkVWmHNHuAyNRZD(G)EW1KXdn(7FoTiNYaCd)utOaIMq(CoLEnF3FF7V4JZYV0a))pANqUJl(F1FFemnkuRcXhZ1smlCjmACt4IMqxxCdRRBcDwkVj8lsAnOCUqTUsZHRKd(cJs3jKpdoVo5kWhZYuTKvazpEY954TLJNCdT6)Qgce9JQIkJrAYC)y0R33nJEdcVXG(dnHpTRj8EN(jfu4C5tZWvPDVQhl1n4G9GtWKebozwZU7XSBdoCFEgCtpm6mBBPPkQPABTh5F0jfCyOEyAtN5ySz90GmSbL1SAg)PHXOQeMTRJsf0FmL4MCG4rR8X(g)(bxZ(xsb5sd8mAViAa2q1NRxvM4S2vdCE4YL(6fllh4X0TT2vRN76BqhVuw)9VfD1MS8kzLmfThypzThvLfpRECFMMkQpZ2OyJyYHHLAyI4YON55FF8UzuBBqPsLErASQnQoJUk6pxMhAC39UnFD8PpuiN9r(83RmaeNGJgt)LZszu1KuUZA(LtQRdlAJx6xuhFqb7nWhTdPJ300pXHJZF)8goDapmOvPE7n39kDmzOLMbUBr6ysrx9cARLB5guo4sH4yVAsC5)cErVJ0Jw56kBQralxaENgr(rQunIMNYsc90gX1W1THANXefoOyD902PTU5ST9ey5WrFDtHRT8TK1pnfSekv)IsnHWOGRfUJ(Vdvt4hSEryOM8Pi3U2mTq(rDSDH4DsyZpb2CjSnnnj8WVpLTBFtt4Z6F)lBtzE1egEl1WR(4S)Sg)gJeRRFGVwhNzEz)(Rm9pkuumWqfFYe)9Fdh)FOiX8t())d]] )
-spec:RegisterPack( "Feral DPS", 20240510.1, [[Hekili:nR1wVnoUv4FlgfqizZmUwzSZmdqCEOOOatAX0fWlAFts0s0jcr3afvUayOF79CifLOejLDs3fyFijwKNB8WZn95e4h8Bb7siCAWpVE11RxTXF1YvRw9LnFpyh)TkAWUks8tKhGpuqYHF)pOmswB0F)x3HB9wwjjbfrDzdlg2oy3(M0m(pkc2BxUFfOTIgh8tF)GDpMMKqLKsRJd29Fl5)R)zBKshSM0K2OFLLwYs5P0627BV)3kF4HmABej5zsrmf2NvYj80Yc4t04Y8CArI4562Ouyr(Ja1XzKA45YkXglbtNvEindmysSCPkbZ7j8R2(xZjSNclpecSg(sAwYNspSDrtL3I9nhoSC6UlBQAV)Vyto8hlzf1DC3EVnsIj8WdLS8XQypLWelV0fFvLIJ8997cR1utdt508A9fveoSYJW1kdUdOjHK4yAg4SXT(eYE5HdHpeNS1hTNAkpCFzrt9sW5Z(6b8wjCDv8wFVleMjp9bqsHhAyVbg6XJXLLzjLVumAdgnNKwuF3w)nxQBgSMIq5tHzP18pHHxBXd(luYZuu)gUcp12Pfpesli7ZG7)ZrKHCsXtHKshIDHf56Hc6zk8inhc9UBTq5H5LjuP0E36)DO7pOQWGj9dPk4c1ZKJZ1NJWSjiD(Me8QfnICGjadXbMHxC2BHAemL39Wgu2t25RBttE68SiD0Ck7bArmsDxu1u6pqOSuA4Hug8lm8g5d0vr5lECcWnFzzdVonHETbRISH4hrQc78vJz5RtzHrEgkK27uR5K8kAIGBvwYT(l3mLT6hzurjOeQGpwALo5EWZGikOVYHkFg6mTczfPbougIwyrHSsctqf8xBKbN1Y40YM6W9q9fXba(RnkZjfq1zL)O7jl0XipjKd(xhA0W7w)yztwsygErA92C0TFh1oV6LxgM2VzL)ojDiR8fQuwEWbJSSkMFhuIKdjU1lZtlcf7fI75bPzShEBzCdJrl43U2i8P)s9c6RX066q6DBLuSuS1sOaDrYXJY0p4mZIj1OQefA7kJiYbelmwFB7EmN86LtskX6dNkXCIXFZQpFHnZWZFZXJRU0M4v5Ugc7UBw5DQUe2e4KavStjNNCN)vzWigqkUnEghlEXq3S0KYm1LCCjJ1uXlzB9pE0KK8gEAMO94w)l9WUVLHvLPf86EF9kpz28Gf2NDU136zrD1pV6(aAZ7c0P4IGR69wwVZuPKl(ZLzv)sAv)LOzUIA35YxShC8htIU1O3zAZONE2xRcyHwWWEfg5Ml6msq42zmJeJd0rh3buTQDEI16JpiFVfNl)66u95Xv11PUlVexAEXn13ihgkTiflG(mHLItf1nKf8shj9w5NEMK1q3UORHPAzrLYPRbDHJF62nFqnb1pG5LkRWC50d45xr9sRMuxy7G2XO2F5InF2QzDPKRqAwnD7QZ2eX0ko8JH)WHT5nv5Qu3V5ChiH(JBoZ40Cz6w9BFmVJzqDNomJwCE8xdJDnRRXI1iYZYYM7fuq71oNUkhWtZP36B7Wp0f2(M5KMmt5HAPVxDNthPu6WVYraK4c9k3xIY97fxF6VuQ2Tp9Ak9s(ufKgoCokXOiWOI87WigF2pE0952UqL9SWvm843SYEnpzBK3FqW4XXCtGiyi(nOVzO8DyQbjpFWXnZOpTt4eHgS7zWwaMuWcT67lHfFHWkWURb7(rEvjJJW68T2iP8BJWCL6LT3hSt8jeVPEvcp8tbiwDVKCWFtHPtWUP5Bs(dLaznoTlGdw0eXeZG3YbUBd2HE42OBBJ8xniD51rWon)eAkGG(ckifzDoFDjdKS2PU09YTr3P8cAPHTrx1gnxQ4ycSNokOXvk5G1JA12rCJt7FMK1bX2VciQB09wAMYep2x1jZi)DcXF70M3y)wB0XJZ5ZSB6F)8VfVrlYzi)iad82LqpaUzEFOSIUEa9MC6UwNijaFtO4lonmxG61gTfcVBJ8AJUOnYc8Esp0CV8gCorzSPn6YbZZbAJ2IPCNtyckkANQzg1qoBqVtW0Yi1xmS58rY216cRkwSfQVbm2ex7R7Tut88oFJTV4AF(YVpg8Vl2vFYPBBkwd)qhoQRppT29svZNJpvNNTONpNgCK6YsPazomYTLwrA9qgd35GCgTOzwXmDLgac1s7ghTLSkjlqLQlXUaQ5Zr7EFw86Dc0PZv2E2eWj4PQjh6y4bpJ0cBOTkBPVCJw8HaFI5JOnHHvjhXHFeCSA18ruFMpSTdKwnRjT6eDz6aSvtndaSGScZR40R0bH7iVQgmVc2DhopGTRrZ7UleF3rUkyF1D8pj14mDUMI)78Xd(UdvNInSJyD)n69z7cng3N13DuNjAsIWdfIsIIEoqvsq4yKLeHyRVw3xpgalH14oOf6PRapt2MwkhDWMLn4TcG2WodGolxCQvUTFPCYRJgeqLaWXV81UViZ5RykQ323cd1ULV6159iUdbnfUEJtRv5hpxVT5U4dnOM9Kz5UfEFQOppm7LXnGNCYk0NVAKF9d3(yQrCN0i8oVH8m74mBhMb3nIpcQlFXBG0b9RZcyUtIVqK(mhK(QrArF2CGARO7YUdVj(2ckK(gxWydxIOuCvm0DtUZXY()2SuZ1RC(Uj)Qj3mwZHNPz7IZZx)NLtKQVJ7kN2lBo(7DWDPtnFNIL5hc4pI2gBMViP75lKZ0n)8BCdOuSu6RSseOpij1BAJFkRHkIBmbGv6xTInU4KTrii1lKm6f6Tv7RZkspy3oSlibAj6ofhii0DseWrhSBv)bRlIzm01Tr)Ii6DJOOVJd4L2kPEwEsNGC4zQm9zy)2jPas30DvM4KyPM9z62TJtLvpVf4zEhoFB1JpTB1w05jCwR7ELG3Hd1cOztsXo5WfVtWkhbMKDWkNgdoumbbhCeeVOqNQKrd(BclMLiMX1mLGbAOME)ICg(tnk5WxS5z7vS3p4mH18KVid(v42n)5CYuFau3td1NZmQETU9m6LzCdZ6i0yhSMXt5IoEsnn5FxO)pekur7h)hS3Ad(p(yWUDnvugmgqTGJG)3p]] )
-spec:RegisterPack( "Feral Tank (IV)", 20230613, [[Hekili:vI1wpnoou4Fl8cIoW0nfOfwj68Wk0kb7kMrkODFZjUooflsIJCCaXQQ8BFp2oxCsC6LhMrPoh)DoNVZvcAb6vKFewsrVCT3134TAXnZxCR3QRVg5l)kNI8ZXK3XBHhYWPW))NuboPk8vC27vHx80)mtjXxjCCKcPcEPGasH83uYsKpLH24g(fGS5uc6LfWtVXIIOgrPfeK))YL)9FvfwRQhfLSOgn(lbJlysgTO65QNFLVDBcTkeh9boJqbPeCjwY4zWtucpnLMfP)Drvidou(ginjbxa)MNRFXCWbe8ywcy2yI5OC9L3GLxU(3sXI3d4XbWvd(KLeDflE9zL5NF2MY445BzXs73oVmV6zxWiFJlYkQVSBrIycAWgkweeZfP7v0CU2jFU9TWzeCssG5NbjSc5vQa2AwgtAlvzbnGjPPf2h2ax3jVbXEbeHOraKeAcekuV6k115XXbBjrRxyFbrz2yLRDgmNQ8fnD13fbY6C1D(GgqZOPqq9h3EuyonE2xFc(SJrvCdi3hybdVjHAWxYsPbsEqeJE1h4Ks66lIOALjfy4gzBdIktt)sz8345nB3ojwSLkNBDXdOcvTruqcMOy1gTCwTwAogWF3UHNviHQXhwEs4hq4a3XZxxqLSyfn0i9CNgIbAlDMdfrF7ILF3PXmZCRaAsbDT3bmSuGaLW)g57tyrNpuLcQcIIhUFY30I0Xhogzv7HXMYdCsANc1qtPqwug5RHipoTysF)25lprEPZOu1jGrfJPcgniwv6eR6)Q8EOEhArskc4CsDFpscipbxiH6HE98QXHMjGHg9BxOGsP9hw4ns(nq3gQ49rNNIltgJIc75KsHGMj)rn1RK0q7xor2KoSE50HsZ7BHldgTOBFyqDKP1gNSZpghgD4sTiFy6)40AF)C3UP9Xr4v8jl3ymJi2vEdtqu9Yp1GB9DCgGRFNoit(cYPcm9sla82FqFLBTy5ndWd5)bybG81BIS07oK)NyHQHEbY)P0CUqQ2GyjSoHg4Qq1qNI5vpJ81pPxvIgdgReE8f9Qt0mfphH(JMLhq(dNdBUDGz9jvTpsc2G6Yn3ODMSnEGq3ylKzg9ajUvjHftPSQ2BmXm8bqSCGBqG1RGKqSAfoNtydp3WqDtTRc)rv4TDkEWC7EeqtWsP6vNOQpEnOq)Ujr)SQqBW6RhKk(yItocYC4EWuHUl3uQPEcAxJ8VOkCQ9f0uhSZqv4SQWD7G1rhT5GgWAhX(4MuMtYuoR1uSMEy0SZz5vHpa5)2Mq)glT5KJTcwSB7Wnq6oT2rKj6Kv7j6jOiFVwhZ502QWVb)fj6c4VpPdoRTQ5uzYjmrDmDIHUA(8(dkHRrZ2C3OM4UkBpY4G7HEodfJv7PenCvFFyE2v66bypyPNdkZHy4XtTnDb0TsC0fOJTSxnsBgqMIRfK685rJ4DvB3PaLfR9HfEDyygapQZ)Wrg1ZCDnZWPUSNWQ7Pxhz7wTQk8YjRe0zs9fWD2MwMwOhSMvN1R0QlxC6bw7zlSoyTlIwzZwwMYag7oBXgh)6l89h28g2br1qEFLDUm9F)4JIRSYC6wqQldxpoEVz5Nys41hojC4yK(b9E7UP3Pz4oo73DDKL7GagRgnL0(Dw2pNOxIOxjVJVfKTJ1)ZiT)Q(bBOy(4rU4TJFPgdJ08AxBtAsiWf0OFM1(H(E8x(nFNpCPYoq(psJ)pm5nT8O))d]] )
+spec:RegisterPack( "Feral DPS", 20240521, [[Hekili:TVvFVTnVr8plgdWWbP1ZYVK0hG48hdddOzdzpa(bB)NKzKOJ1IEduujnfg6Z(oskkrXxKvsBX6akqBIn5DhpE8UF3XxIVN)F4VlcrX(3VCXY1l2S0BU3Q1xT8t(7OVwG93vGcFc9i8Hmuk8Z)gMGsQ3)x)9DSUEnjhfXerzEfje62F3dvXj0pN5)GD5EfqBbo0)Epp)DhJJIWcsXLH(7(350)XFVEVCmivXr17)DsCojMgJlRVR(U)i)XhtW17rrpJYcXq)KCkIgNNbFchMNMIZI4FVSEFm0i9iqDycQe(EEbVJ5GQtYpeNakmku0ubN5hq0l3(NtrKNcYpeaSg8sCs0hIpSDYdvhomVegQa(NQkQV7pzJz6XCswjNfgn2ijeeYHCsAdrtfY(bmIWBEUl(kY5ZZ7A7fARQehetXPLQnkjSRLJWAjbm84OauyiobSWSU(aJ98dhcEmmARhtFkXWempRQCoyXjxFGTueSUiCR30zC1Kg)iiPGdvKxbf90PW88KO8xY61bbNIIZkVDR3MluvdsvwG4BbjXL0pW8P2YM4VGrpJzJVHPyQS74ShdWzOhsGf9XiYakk7PauUdXoXICNYe0Zy4R4uWF7218bpinpclK2BE8FdJ97COyotQtsPZfBC0MolhJWSjiv(0CEv8gzCWca68dmDVOKxduiqN3hGoWKNSZxtN68eYWbs4rLFG9Ja(mPGeNcEUPOOmCzz7KQFZmBeyCip(68WkcbNrVz5ctDQzLJjeCkqnolKPnnET60FaHjX4GdXe4hSWhgFm1k)LPueWnDEEfTmocV0GvE0w4rgvbnRf9z5ADwiONb0525haqLwGJ4ClJcVXB(gD2kpsWCCTimNpsCHk5tHVdIid)fkaNAmMXfmwz0atkdrZ1OasoIWPc(TnYG5AEyCEvzWda(fFca)2gLPOmaYxApA(Mf6iON4YH9BhJOH1T8yEvsuqcBH06QzVv)gQDU0lwmm1FZ0jns6qs(lyHSMctm08Iq6TaemfagkNNgNfW7lG1NUN6Ad3N2f1z4VecU3b4B3kOyoVR5qcGSOtNeH3WCMeIkzdfhiVbMIhJXBO)4TT5RPOVCHwqpd)5Cb(Ak)vl(4mBQXuVnNoT4cBIxInyiSBVAX0ZLfYMa1CuzzIP0OB9UmbQBbcXTXtFFXzDzlJJYtKlYH5esvbnNS170jtssROXj80VB9Uykl7EEqrECgTS1wVyQiAUtdBJo36zDUix6hE4EhJ20zmJIlcUS1AzDntgso5Nl1Q8L4I2frZyfzVdfVy354htGUvV3bsZOgE2IvbSGZiSCfgXMtAusq42zmbfYkye3pdOSv78eQuNqN8NozS8RoMYp3hvxL6M4swtdloDBdVylM5em1FngkpMGFKz)fLhdJ9rmkHEKTEDZQf25TSI8C8ZqUfWZdwqdPLAmU2bJ9YiX6yWe(QCMIQse56Ee3IdUzJDIlQsEgCw(k3wgLtNlngaAz4tGh40Enc1qe(02v9Bug5T2XmXM3yN)nWkf(FWHdtN1uXrk6)KtcqKu4Na2vLi2JHHF6KKgfPYYnyPvPAD1fxyxXIWWaGsI)kRuBjuVPIX6Pv1qfo1idXPOxM91A0CPDk50STUyNPMWyTv)B(0cLDK2Z981mubeZxcf)ctA7cvnCBIvFKjAfi4YX0rGOKa6rcQ84i9I(U6pptmdA5URQNUM6wXoVzYCqUzL7OvRapsS83l4JmF27caso4VpqO2CEJfiQHH35I3ObJgk94)ZbKAuUFIbLml2EKatnm(waNySmoak5omCHD0RUoPpmJkLt)WwSzdFFxa)6VdbhaGU8o)UhV8nd2zX0msapfKHri3WxHkRde4nLn1JABAE6KviGn(7GztjmgYtA273M75V7fejJ5m5V7ZPf5ek7KIVUEVqDQ3ZoYRY5135VJ)j2ry3QHWxUNFU4nhbN)FXFxijMcgnK)Uou1693uVF1c5zi7VZkmUpfuSXkT1ksZeuNjQvofLgKTIAPdWZKZANYrnUTE)T173SPtwSfvg7BCYUv4I9tR3B69uVFlyan7SzTvyr6g7whxMcCLtfWgipFmMbdZ5G6R3F6KkL9b8fQQtqFUcFv9(lG)Py(1J1zQ)1Vb1NHARnbmsgOR32sjOQ9otlim66ZbdYzZHp9M8b6ewdkkte)2i9cbD6tkHgIKmmb4TWPeMO5vP6lc9PbO3jCjdCXZXb6C(BH2vhtgDlvPtKMsNKvQKy6uOrT74Z3xa2SUjTAobHFJ98cTUcocb9gjiqJQWalDyLVQVvUsZAqzoGhGMPTqZsIBV(ln7xV1dX1HPrHBGuxxbg3A6jTMCBw)ldtymh6Oib8uMm20ZO64U5etUMdQHnThe1UXDg1DfIm9K1G29m1nUA3aKivyG4AELmIhgS3(OoX6aZ7QFnz80lRB1uZB)A8kBBTfdNC4nRWFx0RHr8fhVOYTT5WqTCCJAZreomcT(yoArpmQnyivLLCaeXWTxL9WfyjHPuVRDv0H(NX6WLxX1hne)U1ERk69Roh0bTZgp4eP)X4kkoyr9(p2bFOFMYmfLboWGrw0dJqblXgUGBlGUsCRqjMooCkRjTDJC2zUP0i(ybWLxcvBJ4NfVsTTDhz)WWAGL6m3XIevMzZg6wgK0DrZK38ch4uiSnchqZ7vawezsXOKGMad3aLJrZ(MvlzQjPX3n5xQTY0ZxJFxsddJozC26FwMrSRHAymy5LajC8f8PFrqk1kPf4Qy7KSmm8R5TcXNPYBgIpxDC7qCcTaTSEZWGKUbTfxA0WByHQwsW5GV7UUhJs2FByxgxvK96hhOuUUl2QjjWqYunlGBijjF9nAQ6Zg)rTPHEv92PnAPA6xCZVoAIFD0e)6Oj()OJMOTaoRNjG7yzgFA1)VspnJmGXBWcG)2peKvJdptCMfU9T0O(7DC6pIt4WDO8B8eoUUVju)eoU3t3J1mVWiwuzZuNWvauzVZAxK(vSzMHZRO9OnvCQFV7kr55CAg8zrs6Pw6Yy3(2pvfVy1w)PE6QYPLlgoRJL38PQs3SFYHt908WC4BnQ)Ba9mOXU9ahxs1MsrpZPpy7zJYTnEZvYWkEEJNbF149KkLdFY37DLQGNj3YXaOUIxBQI2ex0bZANLMNEQY40FFNdG)kFmQ9mRkpy1ZG729kvnqoBwr8CxUK8bSQA5fBGzGJf24LSoSdXaWV6VYvho79p12gFdnuTbQL4hWoGwQARn3bKbgBN2a5oSVdWUNnR7D)P0JYfeZBuxl322uk6lw30TOMFujo6FMP(xBdKF7Z)lg9vS)at83TRQatGDFxY5W))c]] )
+spec:RegisterPack( "Feral Guardian", 20240521, [[Hekili:TRvBVTTnq4FlbdiibRqloooTfioFyyydnBiBaUy7BsIwIYMZ6nqr5uxyOF77iPEHIIuronfOdOaTowu3D8E9HhVe3zUF0DviIHDF86RU(MRwC9mNzZV52flCxXoKJDxLJc2H2aFjfLaF(RykkUY)3kr0qckL)(dXzOqUCkYkPbanURwxsIzFi1DTzHFnqBooW9XzZCxTLegILKIlcCx9pzS)43R8R3OFHwscR8)ikDxL)FrjzucJGlQEO6HpMTztmUYhfUhLgGbQOzmeJKLcFdhKLKGtdfpxu5tGfzBbQdIrfWZz5Ix4aganlIedQnkqUuUG51i2pU8Nsq0DEzrEaREprIdFdjA5zRlJICkGTYt8TY8QhmXlBBgnTqWHnswJruVOmAYOuLNjmQhAFlSwzb2JWWjfQl2qy3kBHyif814qpuqaogCQ8x9go7zrrEBccxotLbAzQN8jVysb7n8O(sHAYGqGhkdZvvHD3Q8Gh4Cop7XE4uCceEU)eKPr59SShGypHr770gyHwL5m0Mn0mvzm0r35QB1eGUiko9ZeWBrXBaBP2Bb8SfJIzBDYdy3n)kZ8wus3t2JI9iPfmsAaRqJXBSWyepv3lylIUb7XFbNpg)jMtwjRGeIFRzotqLXCIPqfQtqjf0E29lwyM48Y49yk5ZcFwygZjgfWTqSdJeSJKU58Elcj4b7woV)IuCccmV7UXILGGna7frOWhCRIVvfyg4o2u4WzLb)3lk68lcXIWwc6FZOEiAc8jfhwkeQty2tPhp2qJIu5rxdR2Ow3E5LMvSqmSbOyYNbfXJMjDXdvm(BAvnuUvnAG4u0RHVR1Pzt7wd1Oy6oBXfZmHt5rD9O)DVdsY(bJPNhsr5qzFroLB0MfAZwlktmMJCwDTQqJ7H91pXmfWMfjZMjGTLIk2oXSOx185lKwql3GnC8O2sDrSN3nnCtUBU9QvJapCy1VeWNA(FzaqnB(ldeQM7PdevZWlm4nzWOgR6BsaPAL7ByqPAn80bMQz8uaN4SmnaQAHBf7OPo4jsExomNkLotmvBwZ3Rc4xBbXyaG2YoF1Rx(Ib7m4AMiGNcYWeKBWHaWDjXBkwoZAi44rJqal44QDBtt3H8KfYgiC5fvsp0VRxb(g9GNcbgfqtnGrMRFPfgrD9CItWGPLgCqKsiiXitgbSGDnn7PZ7JgFTz(vHXH1hffxHpkAFDbBZTBsYXHcr06KN5SWiVfBbijrMHeSHsYv55C4zqoP4pXGlKzE3j5cScGqWqnVjcfSfMK)tR0coHSaswzH3AImNL)tRKxxRw7TQFYgXu0UACTD2jYuuOyBwzCOxmNe7X)Ejn1SmEgJmYnEG5c8NcWffE47xkjZr8kh4MHPH1acq9hIgG4DoSPdMOdR74rEpjBo0aMVS(Xe0NU0DfGLuaYT5M(ZEVdCj)Nq0uouU7QpKKNrz87OVaUWUqfQ853MRWP6b3vIVXhHql(a8WJIHtGtrRJXHU)S7Qa4U)q1bYDvxpnv(3v5p)QMBV7UYytuUmqXMQ0UrrAdBPIlQ5wfLwPMIAP3Efxo3yvoQNAw5Fp42w0jloKkN9fwz34H1(Nx5pe7UYFj4ah(Y6cyPhPBVBp2GRa3Avbm1ILypUa2MNRrRk)JhvPSF7wsv1Alxcf(2k)lH)P4(1Hv5Q)Bpb1NJ3OzadAftxVn1qMQ2BTPmPtx3ggqo3gE3jLd0jS66AUiE)eZcbD6DkLgYw84cy2vwLWzAzvQ5IW70Gy6eEddcXlWb6s(BBSsDp50DTkDYMe1jzUkjdtk0O2E95lRa7IoJwTJmzEJ5UYAtfSucoBIGa1QchS0Ix(2(E5snVbJNagblZAHMBiUDwKA(VEXd5Sj1OqeouASIl4woSm7snrypgvNCH6gQipgWLE31beyRk7P2SgLNm5jh9DVExhh)DWwFI7W4GRYJR7M3zt1KyQNtBNAAsyCyqqMQQERbjthAhr94Nv3KXRoWC1eT(dyF8tQ1ui5e2h)e5rSbzUZyjOm9O(37k57DL89Us(FuxjJ3oG9AzdhtOCWz3eM6A84Rx)pZNy)p3Csn38AxN(1O5g7LYNyZnVD8MBECMEg7aPmLGk3sTcxbqL9gYf)KeXjmTNfp6HlAJQsjZwDrTEPg9agL5xnSc0GKSF(IHHBn2jUgLHCgxImjT5C9m4L2ZJN2XEG7FcTBzAGyIW6mhLZaLZIzCu8HdjRrocJV3WYuqC4ZRzCO16PNPOnK8NbjTEiAkBt3u26Wqn7viYjQ1ZRQm1TNbFTBkBdG2QdiJGQ2m7nvh)ofSsZNEQp)TXZhg5YF6JLZsUUeHvl1qd2XEwhaN2m0o40NLntntDWDkqRAdVt5nk)Ykel2FiEc87Ub51dkUjLt2gmQah(NPT)baj)dY5Ip83Cgk5nI7UAvjCHT0YIcblU)3p]] )
 
 
 spec:RegisterPackSelector( "balance", "Balance (IV)", "|T136096:0|t Balance",
@@ -4178,7 +4241,7 @@ spec:RegisterPackSelector( "feral_dps", "Feral DPS", "|T132115:0|t Feral DPS",
         return tab2 > max( tab1, tab3 ) and talent.thick_hide.rank == 0
     end )
 
-spec:RegisterPackSelector( "feral_tank", "Feral Tank (IV)", "|T132276:0|t Feral Tank",
+spec:RegisterPackSelector( "feral_tank", "Feral Guardian", "|T132276:0|t Feral Tank",
     "If you have spent more points in |T132276:0|t Feral than in any other tree and have taken Thick Hide, this priority will be automatically selected for you.",
     function( tab1, tab2, tab3 )
         return tab2 > max( tab1, tab3 ) and talent.thick_hide.rank > 0
